@@ -13,15 +13,18 @@ use embassy_stm32::time::Hertz;
 //use embassy_stm32::timer::low_level::GeneralPurpose16bitInstance;
 use embassy_stm32::Config;
 use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
-use embassy_stm32::gpio::{Output, Pull, Level, Speed};
+use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::interrupt;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::usart::{self, Uart};
+use embassy_stm32::i2c::{self, I2c};
 //use embassy_stm32::timer::pwm_input::PwmInput;
 //use embassy_stm32::time::hz;
 //use embassy_stm32::timer::CountingMode;
 use embassy_stm32::exti::ExtiInput;
 use embassy_time::Timer;
+use embassy_stm32::time::khz;
+use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use {defmt_rtt as _, panic_probe as _};
 
 // Declare async tasks
@@ -65,13 +68,35 @@ async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
     }
 }
 
+// Declare async tasks
+#[embassy_executor::task]
+async fn pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM1>) {
+    let mut ch1 = pwm.ch1();
+    ch1.enable();
+
+    // Loop to read from UART and echo back
+    loop {
+        ch1.set_duty_cycle_fully_off();
+        Timer::after_millis(300).await;
+        ch1.set_duty_cycle_fraction(1, 4);
+        Timer::after_millis(300).await;
+        ch1.set_duty_cycle_fraction(1, 2);
+        Timer::after_millis(300).await;
+        ch1.set_duty_cycle(ch1.max_duty_cycle() - 1);
+        Timer::after_millis(300).await;
+    }
+}
+
 //bind_interrupts!(struct Irqs {
 //    TIM2 => timer::CaptureCompareInterruptHandler<peripherals::TIM2>;
 //});
 
 bind_interrupts!(struct Irqs {
     LPUART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::LPUART1>;
+    I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
+    I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
+
 
 //#[link_section = ".ram2bss"]
 #[link_section = ".ccmram"]
@@ -79,6 +104,9 @@ static mut TESTE: i32 = 60;
 
 #[link_section = ".data2"]
 static mut TESTE2: i32 = 70;
+
+const ADDRESS: u8 = 0x53;
+const WHOAMI: u8 = 0;
 
 #[pre_init]
 unsafe fn before_main() {
@@ -183,8 +211,53 @@ async fn main(spawner: Spawner) {
     let lpusart = Uart::new(p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config).unwrap();
     spawner.spawn(uart_task(lpusart)).unwrap();
 
-    //let mut pwm_input = PwmInput::new(p.TIM2, p.PA0, Pull::None, khz(10));
-    //pwm_input.enable();
+    let ch1_pin = PwmPin::new_ch1(p.PC0, OutputType::PushPull);
+    let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM1> = SimplePwm::new(p.TIM1, Some(ch1_pin), None, None, None, khz(10), Default::default());
+    //let mut ch1: embassy_stm32::timer::simple_pwm::SimplePwmChannel<'_, embassy_stm32::peripherals::TIM1> = pwm.ch1();
+    //ch1.enable();
+
+    spawner.spawn(pwm_task(pwm)).unwrap();
+
+    //let mut i2c = I2c::new_blocking(p.I2C1, p.PB8, p.PB9, Hertz(100_000), i2c::Config::default());
+    //println!("{:?}", p.PB8.af_num());
+
+    let mut config: i2c::Config = Default::default();
+    config.scl_pullup = true;
+    config.sda_pullup = true;
+    config.timeout = embassy_time::Duration::from_millis(1000);
+
+    let mut i2c = I2c::new(
+        p.I2C1,
+        p.PB8,
+        p.PB9,
+        Irqs,
+        p.DMA1_CH3,
+        p.DMA1_CH4,
+        Hertz::khz(100),
+        config,
+    );
+
+    //info!("AF: {:?}", p.PB8.af_num());
+    //info!("AF: {:?}", p.PB9.af_num());
+
+    let mut i2c_cs = Output::new(p.PC9, Level::Low, Speed::Low);
+    Timer::after_millis(50).await;
+
+    let mut data = [0u8; 1];
+    i2c_cs.set_high();
+     Timer::after_millis(5).await;
+    match i2c.write_read(ADDRESS, &[WHOAMI], &mut data).await {
+        Ok(()) => {
+            if data[0] == 0xE5 {
+                info!("ADXL345 found!");
+            }else{
+                info!("Whoami: {}", data[0]);
+            }
+        },
+        Err(e) => error!("I2c Error: {:?}", e),
+    }
+    i2c_cs.set_low();
+
 
     let mut led = Output::new(p.PA5, Level::High, Speed::Low);
 
