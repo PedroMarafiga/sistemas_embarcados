@@ -18,6 +18,7 @@ use embassy_stm32::interrupt;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::usart::{self, Uart};
 use embassy_stm32::i2c::{self, I2c};
+use adxl345_eh_driver::{Driver, address, GRange, OutputDataRate};
 //use embassy_stm32::timer::pwm_input::PwmInput;
 //use embassy_stm32::time::hz;
 //use embassy_stm32::timer::CountingMode;
@@ -84,6 +85,20 @@ async fn pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM1>)
         Timer::after_millis(300).await;
         ch1.set_duty_cycle(ch1.max_duty_cycle() - 1);
         Timer::after_millis(300).await;
+    }
+}
+
+// Declare async tasks
+#[embassy_executor::task]
+async fn accel_task(mut accel: Driver<I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>) {
+//pub async fn i2c_slave_task(mut i2c_slave: I2c<'static, embassy_stm32::mode::Async, i2c::mode::MultiMaster>) {
+    accel.set_range(GRange::Two).unwrap();
+    accel.set_datarate(OutputDataRate::Hz0_10).unwrap();
+    loop {
+        if let Ok((x, y, z)) = accel.get_accel(){
+            info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
+        }
+        Timer::after_millis(1000).await;
     }
 }
 
@@ -211,7 +226,7 @@ async fn main(spawner: Spawner) {
     let lpusart = Uart::new(p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config).unwrap();
     spawner.spawn(uart_task(lpusart)).unwrap();
 
-    let ch1_pin = PwmPin::new_ch1(p.PC0, OutputType::PushPull);
+    let ch1_pin = PwmPin::new(p.PC0, OutputType::PushPull);
     let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM1> = SimplePwm::new(p.TIM1, Some(ch1_pin), None, None, None, khz(10), Default::default());
     //let mut ch1: embassy_stm32::timer::simple_pwm::SimplePwmChannel<'_, embassy_stm32::peripherals::TIM1> = pwm.ch1();
     //ch1.enable();
@@ -224,6 +239,7 @@ async fn main(spawner: Spawner) {
     let mut config: i2c::Config = Default::default();
     config.scl_pullup = true;
     config.sda_pullup = true;
+    config.frequency = Hertz(100_000); // 100kHz I2C speed
     config.timeout = embassy_time::Duration::from_millis(1000);
 
     let mut i2c = I2c::new(
@@ -233,7 +249,7 @@ async fn main(spawner: Spawner) {
         Irqs,
         p.DMA1_CH3,
         p.DMA1_CH4,
-        Hertz::khz(100),
+        //Hertz::khz(100),
         config,
     );
 
@@ -256,7 +272,13 @@ async fn main(spawner: Spawner) {
         },
         Err(e) => error!("I2c Error: {:?}", e),
     }
-    i2c_cs.set_low();
+    //i2c_cs.set_low();
+
+    let mut accel = adxl345_eh_driver::Driver::new(i2c, Some(address::SECONDARY)).unwrap();
+    let (x, y, z) = accel.get_accel_raw().unwrap();
+    info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
+
+    spawner.spawn(accel_task(accel)).unwrap();
 
 
     let mut led = Output::new(p.PA5, Level::High, Speed::Low);

@@ -21,14 +21,15 @@ futures = { version = "0.3.31", default-features = false, features = ["async-awa
 heapless = { version = "0.8.0", default-features = false }
 static_cell = "2.1.1"
 embedded-hal = "1.0.0"
-embassy-stm32 = {version = "0.2.0", features = [ "defmt", "time-driver-any", "stm32g474re", "memory-x", "unstable-pac", "exti", "time"] }
+embassy-stm32 = {version = "0.4.0", features = [ "defmt", "time-driver-any", "stm32g474re", "single-bank", "memory-x", "unstable-pac", "exti", "time"] }
 embassy-sync = {version = "0.7.0", features = ["defmt"]}
-embassy-executor = {version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "defmt"]}
-embassy-time = {version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"]}
+embassy-executor = {version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"]}
+embassy-time = {version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"]}
 embassy-futures = "0.1.1"
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 cortex-m-semihosting = "0.5.0"
+adxl345-eh-driver = "0.2.2"
 
 [profile.release]
 debug = 2
