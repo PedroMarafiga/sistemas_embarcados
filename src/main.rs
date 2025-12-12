@@ -18,7 +18,7 @@ use embassy_stm32::interrupt;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::usart::{self, Uart};
 use embassy_stm32::i2c::{self, I2c};
-use adxl345_eh_driver::{Driver, address, GRange, OutputDataRate};
+use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
 //use embassy_stm32::timer::pwm_input::PwmInput;
 //use embassy_stm32::time::hz;
 //use embassy_stm32::timer::CountingMode;
