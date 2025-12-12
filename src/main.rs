@@ -236,50 +236,7 @@ async fn main(spawner: Spawner) {
     //let mut i2c = I2c::new_blocking(p.I2C1, p.PB8, p.PB9, Hertz(100_000), i2c::Config::default());
     //println!("{:?}", p.PB8.af_num());
 
-    let mut config: i2c::Config = Default::default();
-    config.scl_pullup = true;
-    config.sda_pullup = true;
-    config.frequency = Hertz(100_000); // 100kHz I2C speed
-    config.timeout = embassy_time::Duration::from_millis(1000);
-
-    let mut i2c = I2c::new(
-        p.I2C1,
-        p.PB8,
-        p.PB9,
-        Irqs,
-        p.DMA1_CH3,
-        p.DMA1_CH4,
-        //Hertz::khz(100),
-        config,
-    );
-
-    //info!("AF: {:?}", p.PB8.af_num());
-    //info!("AF: {:?}", p.PB9.af_num());
-
-    let mut i2c_cs = Output::new(p.PC9, Level::Low, Speed::Low);
-    Timer::after_millis(50).await;
-
-    let mut data = [0u8; 1];
-    i2c_cs.set_high();
-     Timer::after_millis(5).await;
-    match i2c.write_read(ADDRESS, &[WHOAMI], &mut data).await {
-        Ok(()) => {
-            if data[0] == 0xE5 {
-                info!("ADXL345 found!");
-            }else{
-                info!("Whoami: {}", data[0]);
-            }
-        },
-        Err(e) => error!("I2c Error: {:?}", e),
-    }
-    //i2c_cs.set_low();
-
-    let mut accel = adxl345_eh_driver::Driver::new(i2c, Some(address::SECONDARY)).unwrap();
-    let (x, y, z) = accel.get_accel_raw().unwrap();
-    info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
-
-    spawner.spawn(accel_task(accel)).unwrap();
-
+    
 
     let mut led = Output::new(p.PA5, Level::High, Speed::Low);
 
