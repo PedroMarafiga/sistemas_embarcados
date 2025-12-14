@@ -18,27 +18,37 @@ pub async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
         
         let ch = buffer[0];
         
-        // Echo character back (non-intrusive)
-        lpuart.write(&buffer).await.unwrap();
-        
         if ch == b'\r' || ch == b'\n' {
-            lpuart.write(b"\r\n").await.unwrap();
-            
             if cmd_index > 0 {
-                // Process command
+                // Verifica se o comando não é apenas espaços em branco
                 let cmd = core::str::from_utf8(&cmd_buffer[..cmd_index]).unwrap_or("");
-                process_command(&mut lpuart, cmd.trim()).await;
+                let trimmed_cmd = cmd.trim();
+                
+                if !trimmed_cmd.is_empty() {
+                    // Só pula linha e processa se houver comando real
+                    lpuart.write(b"\r\n").await.unwrap();
+                    process_command(&mut lpuart, trimmed_cmd).await;
+                    lpuart.write(b"> ").await.unwrap();
+                }
+                
+                // Limpa o buffer independentemente
                 cmd_index = 0;
             }
-            
-            lpuart.write(b"> ").await.unwrap();
+            // Se cmd_index == 0 (linha vazia), não faz nada
         } else if ch == 8 || ch == 127 {
-            // Backspace
+            // Backspace - não permite apagar além do início do comando
             if cmd_index > 0 {
                 cmd_index -= 1;
+                // Envia: backspace, espaço (apaga), backspace (volta)
                 lpuart.write(b"\x08 \x08").await.unwrap();
             }
+            // Se cmd_index == 0, não faz nada (protege o prompt)
+        } else if ch == 3 {  // Ctrl+C
+            lpuart.write(b"^C\r\n> ").await.unwrap();
+            cmd_index = 0;
         } else if cmd_index < cmd_buffer.len() {
+            // Echo character back apenas para caracteres normais
+            lpuart.write(&buffer).await.unwrap();
             cmd_buffer[cmd_index] = ch;
             cmd_index += 1;
         }
