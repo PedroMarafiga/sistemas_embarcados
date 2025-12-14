@@ -16,7 +16,7 @@ use embassy_stm32::time::Hertz;
 use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
 use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
+use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::interrupt;
 use embassy_stm32::usart::{self, Uart};
@@ -27,6 +27,7 @@ use embassy_stm32::Config;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
+use embassy_sync::waitqueue::AtomicWaker;
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -34,6 +35,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
 static TEMP_CHANNEL: Channel<CriticalSectionRawMutex, f32, 1> = Channel::new();
+static BUTTON_STATE_CHANNEL: Channel<CriticalSectionRawMutex, bool, 1> = Channel::new();
 
 #[embassy_executor::task]
 async fn lm35_task(mut adc2: adc::Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC2>) {
@@ -58,13 +60,32 @@ async fn lm35_task(mut adc2: adc::Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC
 
 #[embassy_executor::task]
 async fn motor_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
+    use embassy_futures::select::{select, Either};
+    
     let mut ch2 = pwm.ch2();
     ch2.enable();
 
-    loop {
-        let temp = TEMP_CHANNEL.receive().await;
+    let mut temp = 0.0;  // Valor inicial
+    let mut button_state = false;  // Motor desligado por padrão
 
-        let duty = if temp < 10.0 {
+    loop {
+        // Aguarda por temperatura OU botão (o que chegar primeiro)
+        match select(TEMP_CHANNEL.receive(), BUTTON_STATE_CHANNEL.receive()).await {
+            Either::First(new_temp) => {
+                temp = new_temp;
+            }
+            Either::Second(new_state) => {
+                button_state = new_state;
+                if button_state {
+                    ch2.set_duty_cycle(ch2.max_duty_cycle());
+                    Timer::after_millis(100).await; // Pequeno atraso para estabilização
+                }
+            }
+        }
+
+        let duty = if !button_state {
+            0  // Motor desligado
+        } else if temp < 10.0 {
             0
         } else if temp < 20.0 {
             ch2.max_duty_cycle() * 75 / 100
@@ -75,8 +96,7 @@ async fn motor_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3
         };
 
         ch2.set_duty_cycle(duty);
-
-        info!("Motor PWM set to {} (temp {}°C)", duty, temp);
+        info!("Motor PWM set to {} (temp {}°C, button {})", duty, temp, button_state);
     }
 }
 
@@ -97,9 +117,15 @@ async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<A
 async fn button_task(mut button: ExtiInput<'static>) {
     info!("Press the USER button...");
 
+    let mut state: bool = false;
+
     loop {
         button.wait_for_rising_edge().await;
         info!("Pressed!");
+
+        state = !state;
+        BUTTON_STATE_CHANNEL.send(state).await;
+
         button.wait_for_falling_edge().await;
         info!("Released!");
     }
@@ -107,22 +133,22 @@ async fn button_task(mut button: ExtiInput<'static>) {
 
 // Declare async tasks
 #[embassy_executor::task]
-async fn    pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
+async fn pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
     let mut ch2 = pwm.ch2();
     ch2.enable();
 
     // Loop to read from UART and echo back
     loop {
-         /*  ch1.set_duty_cycle_fully_off();
-        Timer::after_millis(300).await; 
+        /*  ch1.set_duty_cycle_fully_off();
+        Timer::after_millis(300).await;
          ch1.set_duty_cycle_fraction(1, 4);
         Timer::after_millis(300).await; */
         info!("3 /4 duty cycle");
-          ch2.set_duty_cycle_fraction(3, 4);
-        Timer::after_millis(3000).await; 
+        ch2.set_duty_cycle_fraction(3, 4);
+        Timer::after_millis(3000).await;
         info!("100% duty cycle");
         ch2.set_duty_cycle(ch2.max_duty_cycle() - 1);
-        Timer::after_millis(3000).await; 
+        Timer::after_millis(3000).await;
 
         info!("PWM cycle done");
     }
@@ -141,6 +167,19 @@ async fn accel_task(
             info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
         }
         Timer::after_millis(1000).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn blink_task(mut led: Output<'static>) {
+    loop {
+        //info!("high");
+        led.set_high();
+        Timer::after_millis(2000).await;
+
+        //info!("low");
+        led.set_low();
+        Timer::after_millis(500).await;
     }
 }
 
@@ -245,7 +284,7 @@ async fn main(spawner: Spawner) {
     }
     //defmt::println!("Hello, world!");
 
-    // let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
+    let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
 
     //let adc = Adc::new(p.ADC1, &mut Delay);
     //let adc_pin = p.PA1;
@@ -256,9 +295,8 @@ async fn main(spawner: Spawner) {
 
     // Spawned tasks run in the background, concurrently.
     //spawner.spawn(adc_task(adc, p.PA1.degrade_adc())).unwrap();
-    //spawner.spawn(button_task(button)).unwrap();
+    spawner.spawn(button_task(button)).unwrap();
     spawner.spawn(lm35_task(adc2, p.PA1.degrade_adc())).unwrap();
-
 
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
@@ -286,17 +324,10 @@ async fn main(spawner: Spawner) {
     //let mut i2c = I2c::new_blocking(p.I2C1, p.PB8, p.PB9, Hertz(100_000), i2c::Config::default());
     //println!("{:?}", p.PB8.af_num());
 
-    let mut led = Output::new(p.PA5, Level::High, Speed::Low);
+    let led = Output::new(p.PA5, Level::High, Speed::Low);
 
-    loop {
-        //info!("high");
-        led.set_high();
-        Timer::after_millis(500).await;
+    spawner.spawn(blink_task(led)).unwrap();
 
-        //info!("low");
-        led.set_low();
-        Timer::after_millis(500).await;
-    }
 }
 
 /*
