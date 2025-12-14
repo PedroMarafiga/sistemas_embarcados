@@ -2,36 +2,85 @@
 #![no_main]
 
 //use cortex_m::Peripherals;
-use cortex_m_rt::pre_init;
 use core::arch::asm;
+use cortex_m_rt::pre_init;
 use defmt::*;
 use embassy_executor::Spawner;
 //use embassy_stm32::pac::metadata::Peripheral;
-use embassy_stm32::peripherals::ADC1;
+use embassy_stm32::peripherals::{ADC1, ADC2};
 use embassy_stm32::time::Hertz;
 //use embassy_stm32::rcc::low_level::RccPeripheral;
 //use embassy_stm32::timer::low_level::GeneralPurpose16bitInstance;
-use embassy_stm32::Config;
-use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
-use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
-use embassy_stm32::interrupt;
-use embassy_stm32::bind_interrupts;
-use embassy_stm32::usart::{self, Uart};
-use embassy_stm32::i2c::{self, I2c};
 use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
+use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
+use embassy_stm32::bind_interrupts;
+use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::i2c::{self, I2c};
+use embassy_stm32::interrupt;
+use embassy_stm32::usart::{self, Uart};
+use embassy_stm32::Config;
 //use embassy_stm32::timer::pwm_input::PwmInput;
 //use embassy_stm32::time::hz;
 //use embassy_stm32::timer::CountingMode;
 use embassy_stm32::exti::ExtiInput;
-use embassy_time::Timer;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
+use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+
+static TEMP_CHANNEL: Channel<CriticalSectionRawMutex, f32, 1> = Channel::new();
+
+#[embassy_executor::task]
+async fn lm35_task(mut adc2: adc::Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC2>) {
+    adc2.set_sample_time(SampleTime::CYCLES247_5);
+
+    loop {
+        let mut acc = 0u32;
+        for _ in 0..16 {
+            acc += adc2.blocking_read(&mut pin) as u32;
+        }
+        let raw = (acc / 16) as u16;
+
+        let temp_c = (raw as f32) * 3.3 / 4095.0 * 100.0;
+
+        info!("Temp: {} °C", temp_c);
+
+        TEMP_CHANNEL.send(temp_c).await;
+
+        Timer::after_millis(500).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn motor_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
+    let mut ch2 = pwm.ch2();
+    ch2.enable();
+
+    loop {
+        let temp = TEMP_CHANNEL.receive().await;
+
+        let duty = if temp < 10.0 {
+            0
+        } else if temp < 20.0 {
+            ch2.max_duty_cycle() * 75 / 100
+        } else if temp < 30.0 {
+            ch2.max_duty_cycle() * 90 / 100
+        } else {
+            ch2.max_duty_cycle()
+        };
+
+        ch2.set_duty_cycle(duty);
+
+        info!("Motor PWM set to {} (temp {}°C)", duty, temp);
+    }
+}
 
 // Declare async tasks
 #[embassy_executor::task]
 async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<ADC1>) {
-    
     adc.set_sample_time(SampleTime::CYCLES47_5);
 
     loop {
@@ -58,7 +107,10 @@ async fn button_task(mut button: ExtiInput<'static>) {
 #[embassy_executor::task]
 async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
     info!("UART started, type something...");
-    lpuart.write("UART started, type something...".as_bytes()).await.unwrap();
+    lpuart
+        .write("UART started, type something...".as_bytes())
+        .await
+        .unwrap();
 
     let mut buffer = [0u8; 1];
 
@@ -71,31 +123,37 @@ async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
 
 // Declare async tasks
 #[embassy_executor::task]
-async fn pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM1>) {
-    let mut ch1 = pwm.ch1();
-    ch1.enable();
+async fn    pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
+    let mut ch2 = pwm.ch2();
+    ch2.enable();
 
     // Loop to read from UART and echo back
     loop {
-        ch1.set_duty_cycle_fully_off();
-        Timer::after_millis(300).await;
-        ch1.set_duty_cycle_fraction(1, 4);
-        Timer::after_millis(300).await;
-        ch1.set_duty_cycle_fraction(1, 2);
-        Timer::after_millis(300).await;
-        ch1.set_duty_cycle(ch1.max_duty_cycle() - 1);
-        Timer::after_millis(300).await;
+         /*  ch1.set_duty_cycle_fully_off();
+        Timer::after_millis(300).await; 
+         ch1.set_duty_cycle_fraction(1, 4);
+        Timer::after_millis(300).await; */
+        info!("3 /4 duty cycle");
+          ch2.set_duty_cycle_fraction(3, 4);
+        Timer::after_millis(3000).await; 
+        info!("100% duty cycle");
+        ch2.set_duty_cycle(ch2.max_duty_cycle() - 1);
+        Timer::after_millis(3000).await; 
+
+        info!("PWM cycle done");
     }
 }
 
 // Declare async tasks
 #[embassy_executor::task]
-async fn accel_task(mut accel: Driver<I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>) {
-//pub async fn i2c_slave_task(mut i2c_slave: I2c<'static, embassy_stm32::mode::Async, i2c::mode::MultiMaster>) {
+async fn accel_task(
+    mut accel: Driver<I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>,
+) {
+    //pub async fn i2c_slave_task(mut i2c_slave: I2c<'static, embassy_stm32::mode::Async, i2c::mode::MultiMaster>) {
     accel.set_range(GRange::Two).unwrap();
     accel.set_datarate(OutputDataRate::Hz0_10).unwrap();
     loop {
-        if let Ok((x, y, z)) = accel.get_accel(){
+        if let Ok((x, y, z)) = accel.get_accel() {
             info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
         }
         Timer::after_millis(1000).await;
@@ -112,7 +170,6 @@ bind_interrupts!(struct Irqs {
     I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
 
-
 //#[link_section = ".ram2bss"]
 #[link_section = ".ccmram"]
 static mut TESTE: i32 = 60;
@@ -120,13 +177,10 @@ static mut TESTE: i32 = 60;
 #[link_section = ".data2"]
 static mut TESTE2: i32 = 70;
 
-const ADDRESS: u8 = 0x53;
-const WHOAMI: u8 = 0;
-
 #[pre_init]
 unsafe fn before_main() {
     unsafe {
-        asm!{
+        asm! {
             "ldr r0, =__sccmdata
             ldr r1, =__eccmdata
             ldr r2, =__siccmdata
@@ -139,7 +193,7 @@ unsafe fn before_main() {
             1:"
         }
 
-        asm!{
+        asm! {
             "ldr r0, =__sdata2
             ldr r1, =__edata2
             ldr r2, =__sidata2
@@ -155,8 +209,7 @@ unsafe fn before_main() {
 }
 
 #[interrupt]
-unsafe fn TIM3(){
-    
+unsafe fn TIM3() {
     // reset interrupt flag
     //unsafe {
     //    let pin = embassy_stm32::peripherals::PA5::steal();
@@ -167,13 +220,11 @@ unsafe fn TIM3(){
     info!("interrupt happens: tim20");
 }
 
-
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     //unsafe {
-        //TESTE = 10;
-        //TESTE2 = 20;
+    //TESTE = 10;
+    //TESTE2 = 20;
     //}
     let mut config = Config::default();
     {
@@ -210,33 +261,46 @@ async fn main(spawner: Spawner) {
     }
     //defmt::println!("Hello, world!");
 
-    let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
+    // let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
 
     //let adc = Adc::new(p.ADC1, &mut Delay);
     //let adc_pin = p.PA1;
 
-    let adc = Adc::new(p.ADC1);
+    //let adc = Adc::new(p.ADC1);
+
+    let adc2 = Adc::new(p.ADC2);
 
     // Spawned tasks run in the background, concurrently.
-    spawner.spawn(adc_task(adc, p.PA1.degrade_adc())).unwrap();
-    spawner.spawn(button_task(button)).unwrap();
+    //spawner.spawn(adc_task(adc, p.PA1.degrade_adc())).unwrap();
+    //spawner.spawn(button_task(button)).unwrap();
+    spawner.spawn(lm35_task(adc2, p.PA1.degrade_adc())).unwrap();
+
 
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
-    let lpusart = Uart::new(p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config).unwrap();
+    let lpusart = Uart::new(
+        p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config,
+    )
+    .unwrap();
     spawner.spawn(uart_task(lpusart)).unwrap();
 
-    let ch1_pin = PwmPin::new(p.PC0, OutputType::PushPull);
-    let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM1> = SimplePwm::new(p.TIM1, Some(ch1_pin), None, None, None, khz(10), Default::default());
+    let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
+    let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
+        p.TIM3,
+        None,
+        Some(ch2_pin),
+        None,
+        None,
+        khz(500),
+        Default::default(),
+    );
     //let mut ch1: embassy_stm32::timer::simple_pwm::SimplePwmChannel<'_, embassy_stm32::peripherals::TIM1> = pwm.ch1();
     //ch1.enable();
 
-    spawner.spawn(pwm_task(pwm)).unwrap();
+    spawner.spawn(motor_task(pwm)).unwrap();
 
     //let mut i2c = I2c::new_blocking(p.I2C1, p.PB8, p.PB9, Hertz(100_000), i2c::Config::default());
     //println!("{:?}", p.PB8.af_num());
-
-    
 
     let mut led = Output::new(p.PA5, Level::High, Speed::Low);
 
@@ -250,7 +314,6 @@ async fn main(spawner: Spawner) {
         Timer::after_millis(500).await;
     }
 }
-
 
 /*
 // Some panic handler needs to be included. This one halts the processor on panic.
