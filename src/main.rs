@@ -7,6 +7,8 @@ use cortex_m_rt::pre_init;
 use defmt::*;
 use embassy_executor::Spawner;
 //use embassy_stm32::pac::metadata::Peripheral;
+mod utils;
+
 use embassy_stm32::peripherals::{ADC1, ADC2};
 use embassy_stm32::time::Hertz;
 //use embassy_stm32::rcc::low_level::RccPeripheral;
@@ -14,7 +16,7 @@ use embassy_stm32::time::Hertz;
 use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
 use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::interrupt;
 use embassy_stm32::usart::{self, Uart};
@@ -100,24 +102,6 @@ async fn button_task(mut button: ExtiInput<'static>) {
         info!("Pressed!");
         button.wait_for_falling_edge().await;
         info!("Released!");
-    }
-}
-
-// Declare async tasks
-#[embassy_executor::task]
-async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
-    info!("UART started, type something...");
-    lpuart
-        .write("UART started, type something...".as_bytes())
-        .await
-        .unwrap();
-
-    let mut buffer = [0u8; 1];
-
-    // Loop to read from UART and echo back
-    loop {
-        lpuart.read(&mut buffer).await.unwrap();
-        lpuart.write(&buffer).await.unwrap();
     }
 }
 
@@ -282,7 +266,7 @@ async fn main(spawner: Spawner) {
         p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config,
     )
     .unwrap();
-    spawner.spawn(uart_task(lpusart)).unwrap();
+    spawner.spawn(utils::uart_task(lpusart)).unwrap();
 
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
     let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
