@@ -14,7 +14,7 @@ use embassy_stm32::time::Hertz;
 use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
 use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::interrupt;
 use embassy_stm32::usart::{self, Uart};
@@ -30,8 +30,98 @@ use {defmt_rtt as _, panic_probe as _};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embedded_io::Write;
+use heapless::Vec;
+
+// CLI buffers - prontos para quando implementar CLI
+// static mut COMMAND_BUFFER: [u8; 64] = [0; 64];
+// static mut HISTORY_BUFFER: [u8; 64] = [0; 64];
 
 static TEMP_CHANNEL: Channel<CriticalSectionRawMutex, f32, 1> = Channel::new();
+static UART_TX: Channel<CriticalSectionRawMutex, Vec<u8, 128>, 8> = Channel::new();
+
+pub struct Writer;
+
+impl embedded_io::ErrorType for Writer {
+    type Error = embedded_io::ErrorKind;
+}
+
+impl embedded_io::Write for Writer {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        let mut vec = Vec::new();
+        vec.extend_from_slice(buf).map_err(|_| embedded_io::ErrorKind::Other)?;
+        UART_TX
+            .try_send(vec)
+            .map_err(|_| embedded_io::ErrorKind::Other)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+pub enum Command {
+    Help,
+    Tasks,
+    Mem,
+    Rt,
+    Unknown,
+}
+
+fn send(msg: &[u8]) {
+    let mut v: Vec<u8, 128> = Vec::new();
+    let _ = v.extend_from_slice(msg);
+    let _ = UART_TX.try_send(v);
+}
+
+
+fn parse_command(input: &str) -> Command {
+    match input.trim() {
+        "help" => Command::Help,
+        "tasks" => Command::Tasks,
+        "mem" => Command::Mem,
+        "rt" => Command::Rt,
+        _ => Command::Unknown,
+    }
+}
+
+fn execute_command(cmd: Command) {
+    match cmd {
+        Command::Help => {
+            send(b"Available commands:\r\n");
+            send(b"  help  - Show this message\r\n");
+            send(b"  tasks - List tasks\r\n");
+            send(b"  mem   - Memory info\r\n");
+            send(b"  rt    - Runtime info\r\n");
+        }
+
+        Command::Tasks => {
+            send(b"Tasks installed:\r\n");
+            send(b"  - lm35_task\r\n");
+            send(b"  - motor_task\r\n");
+            send(b"  - uart_task\r\n");
+        }
+
+        Command::Mem => {
+            send(b"Memory info:\r\n");
+            send(b"  Heap: not configured (no_std)\r\n");
+            send(b"  Static memory only\r\n");
+        }
+
+        Command::Rt => {
+            send(b"Runtime info:\r\n");
+            send(b"  Executor: Embassy async\r\n");
+            send(b"  Scheduling: cooperative\r\n");
+            send(b"  Preemption: no\r\n");
+        }
+
+        Command::Unknown => {
+            send(b"Unknown command. Type 'help'.\r\n");
+        }
+    }
+}
+
 
 #[embassy_executor::task]
 async fn lm35_task(mut adc2: adc::Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC2>) {
@@ -105,21 +195,48 @@ async fn button_task(mut button: ExtiInput<'static>) {
 
 // Declare async tasks
 #[embassy_executor::task]
-async fn uart_task(mut lpuart: Uart<'static, embassy_stm32::mode::Async>) {
-    info!("UART started, type something...");
-    lpuart
-        .write("UART started, type something...".as_bytes())
-        .await
-        .unwrap();
+async fn uart_task(uart: Uart<'static, embassy_stm32::mode::Async>) {
+    let (mut tx, mut rx) = uart.split();
+    tx.write(b"UART started. Type commands...\r\n").await.unwrap();
 
-    let mut buffer = [0u8; 1];
+    let mut line: heapless::String<64> = heapless::String::new();
+    let mut rx_buf = [0u8; 1];
 
-    // Loop to read from UART and echo back
     loop {
-        lpuart.read(&mut buffer).await.unwrap();
-        lpuart.write(&buffer).await.unwrap();
+        // Primeiro, tenta enviar mensagens pendentes do sistema
+        while let Ok(msg) = UART_TX.try_receive() {
+            tx.write(&msg).await.unwrap();
+        }
+
+        // Depois, tenta ler um byte com timeout curto via select
+        match embassy_futures::select::select(
+            rx.read(&mut rx_buf),
+            Timer::after_millis(10)
+        ).await {
+            embassy_futures::select::Either::First(Ok(_)) => {
+                let byte = rx_buf[0];
+
+                if byte == b'\r' || byte == b'\n' {
+                    if !line.is_empty() {
+                        tx.write(b"\r\n").await.unwrap();
+                        let cmd = parse_command(&line);
+                        execute_command(cmd);
+                        line.clear();
+                    }
+                } else if byte >= 32 && byte <= 126 {
+                    // Echo do caractere
+                    tx.write(&[byte]).await.unwrap();
+                    let _ = line.push(byte as char);
+                }
+            }
+            _ => {
+                // Timeout ou erro - continua o loop
+            }
+        }
     }
 }
+
+
 
 // Declare async tasks
 #[embassy_executor::task]
@@ -278,11 +395,23 @@ async fn main(spawner: Spawner) {
 
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
+
     let lpusart = Uart::new(
-        p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config,
+        p.LPUART1,
+        p.PA3,          // RX
+        p.PA2,          // TX
+        Irqs,
+        p.DMA1_CH1,     // TX DMA
+        p.DMA1_CH2,     // RX DMA
+        config,
     )
     .unwrap();
+
     spawner.spawn(uart_task(lpusart)).unwrap();
+
+    let mut writer = Writer;
+    writer.write(b"Hello from Writer\r\n").unwrap();
+
 
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
     let pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
