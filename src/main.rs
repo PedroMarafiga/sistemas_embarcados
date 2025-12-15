@@ -28,10 +28,12 @@ use embassy_stm32::i2c;
 
 // TEMP_RAW: temperatura em décimos de grau (ex: 235 = 23.5°C)
 // Lida pelo interrupt TIM3 para controle hard real-time do motor
+#[link_section = ".data2"]
 static TEMP_RAW: AtomicU16 = AtomicU16::new(0);
 
 // MOTOR_DUTY: duty cycle do PWM (0-1000)
 // Calculado pelo interrupt TIM3 e aplicado instantaneamente ao hardware
+#[link_section = ".ccmdata"]
 static MOTOR_DUTY: AtomicU16 = AtomicU16::new(0);
 
 // MOTOR_ENABLED: controla se o motor está habilitado (true) ou desabilitado (false)
@@ -153,37 +155,38 @@ unsafe fn before_main() {
 #[interrupt]
 fn TIM3() {
     let motor_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
-    
+    static mut PULSE_START_CNT: u16 = 0;
+
     let duty = if !motor_enabled {
         0
-    } else if MOTOR_START_PULSE.load(Ordering::Relaxed) {
-        // Pulso inicial de 100% por exatamente 200ms para vencer inércia
-        // Contador interno: a cada interrupt (~2ms), decrementa
-        static mut PULSE_COUNTER: u8 = 0;
+    } else if MOTOR_START_PULSE.load(Ordering::Relaxed) {        
         unsafe {
+            let tim3 = embassy_stm32::pac::TIM3;
+            let now = tim3.cnt().read().cnt();
+            const PULSE_TICKS: u16 = 200; // depende do clock e prescaler
+
             // Inicializa contador quando pulso é solicitado
-            if PULSE_COUNTER == 0 {
-                PULSE_COUNTER = 200;  
+            if PULSE_START_CNT == 0 {
+                PULSE_START_CNT = now;
             }
-            
-            if PULSE_COUNTER > 0 {
-                PULSE_COUNTER -= 1;
-            }
-            
-            if PULSE_COUNTER == 0 {
+
+            let elapsed = now.wrapping_sub(PULSE_START_CNT);
+
+            if elapsed >= PULSE_TICKS {
                 MOTOR_START_PULSE.store(false, Ordering::Relaxed);
+                PULSE_START_CNT = 0;
             }
             
             1000   
         }
     } else {
-        let temp = TEMP_RAW.load(Ordering::Relaxed) as f32 / 10.0;
+        let temp = TEMP_RAW.load(Ordering::Relaxed);
 
-        if temp < 10.0 {
+        if temp < 100 {
             0       
-        } else if temp < 20.0 {
+        } else if temp < 200 {
             750    // 75% velocidade
-        } else if temp < 30.0 {
+        } else if temp < 300 {
             900    // 90% velocidade
         } else {
             1000   // 100% velocidade
@@ -194,7 +197,7 @@ fn TIM3() {
 
     let tim3 = embassy_stm32::pac::TIM3;
     tim3.sr().modify(|w| w.set_uif(false));  // Limpa flag de interrupção
-    tim3.ccr(1).write(|w| w.set_ccr(duty));  // Atualiza PWM do canal 2
+    tim3.ccr(1).write(|w| w.set_ccr(duty));  // Atualiza PWM do canal 1
 }
 
 
