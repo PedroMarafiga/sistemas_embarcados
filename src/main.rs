@@ -27,7 +27,6 @@ use embassy_stm32::Config;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_sync::waitqueue::AtomicWaker;
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -100,19 +99,8 @@ async fn motor_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3
     }
 }
 
-// Declare async tasks
-#[embassy_executor::task]
-async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<ADC1>) {
-    adc.set_sample_time(SampleTime::CYCLES47_5);
 
-    loop {
-        let measured = adc.blocking_read(&mut adc_pin);
-        info!("measured: {}", measured);
-        Timer::after_millis(500).await;
-    }
-}
 
-// Declare async tasks
 #[embassy_executor::task]
 async fn button_task(mut button: ExtiInput<'static>) {
     info!("Press the USER button...");
@@ -131,53 +119,12 @@ async fn button_task(mut button: ExtiInput<'static>) {
     }
 }
 
-// Declare async tasks
-#[embassy_executor::task]
-async fn pwm_task(mut pwm: SimplePwm<'static, embassy_stm32::peripherals::TIM3>) {
-    let mut ch2 = pwm.ch2();
-    ch2.enable();
-
-    // Loop to read from UART and echo back
-    loop {
-        /*  ch1.set_duty_cycle_fully_off();
-        Timer::after_millis(300).await;
-         ch1.set_duty_cycle_fraction(1, 4);
-        Timer::after_millis(300).await; */
-        info!("3 /4 duty cycle");
-        ch2.set_duty_cycle_fraction(3, 4);
-        Timer::after_millis(3000).await;
-        info!("100% duty cycle");
-        ch2.set_duty_cycle(ch2.max_duty_cycle() - 1);
-        Timer::after_millis(3000).await;
-
-        info!("PWM cycle done");
-    }
-}
-
-// Declare async tasks
-#[embassy_executor::task]
-async fn accel_task(
-    mut accel: Driver<I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>,
-) {
-    //pub async fn i2c_slave_task(mut i2c_slave: I2c<'static, embassy_stm32::mode::Async, i2c::mode::MultiMaster>) {
-    accel.set_range(GRange::Two).unwrap();
-    accel.set_datarate(OutputDataRate::Hz0_10).unwrap();
-    loop {
-        if let Ok((x, y, z)) = accel.get_accel() {
-            info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
-        }
-        Timer::after_millis(1000).await;
-    }
-}
-
 #[embassy_executor::task]
 async fn blink_task(mut led: Output<'static>) {
     loop {
-        //info!("high");
         led.set_high();
         Timer::after_millis(2000).await;
 
-        //info!("low");
         led.set_low();
         Timer::after_millis(500).await;
     }
@@ -294,7 +241,6 @@ async fn main(spawner: Spawner) {
     let adc2 = Adc::new(p.ADC2);
 
     // Spawned tasks run in the background, concurrently.
-    //spawner.spawn(adc_task(adc, p.PA1.degrade_adc())).unwrap();
     spawner.spawn(button_task(button)).unwrap();
     spawner.spawn(lm35_task(adc2, p.PA1.degrade_adc())).unwrap();
 
@@ -329,49 +275,3 @@ async fn main(spawner: Spawner) {
     spawner.spawn(blink_task(led)).unwrap();
 
 }
-
-/*
-// Some panic handler needs to be included. This one halts the processor on panic.
-use cortex_m_rt::entry;
-use rtt_target::{rtt_init_print, rprintln};
-
-use hal::prelude::*;
-use hal::stm32;
-use stm32g4xx_hal as hal;
-
-#[link_section = ".ram2bss"]
-static mut TESTE: i32 = 10;
-
-#[entry]
-fn main() -> ! {
-    rtt_init_print!();
-    rprintln!("Olá mundo!");
-    unsafe {
-        rprintln!("Teste de variável na memória SRAM2 {}", TESTE);
-    }
-
-    let teste2 = 10;
-    rprintln!("Teste de variável na memória SRAM2 {}", teste2);
-
-    let dp = stm32::Peripherals::take().expect("cannot take peripherals");
-    let mut rcc = dp.RCC.constrain();
-
-    let gpioa = dp.GPIOA.split(&mut rcc);
-    let mut led = gpioa.pa5.into_push_pull_output();
-
-    let core_periphs=cortex_m::Peripherals::take().unwrap();
-    let clocks = rcc.clocks.sys_clk;
-
-    // Create a delay abstraction based on SysTick
-    let mut delay = hal::delay::Delay::new(core_periphs.SYST, clocks.0);
-    loop{
-        rprintln!("High");
-        led.set_high().unwrap();
-        delay.delay_ms(500_u32);
-
-        rprintln!("Low");
-        led.set_low().unwrap();
-        delay.delay_ms(500_u32);
-    }
-}
-*/
