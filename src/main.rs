@@ -1,16 +1,12 @@
 #![no_std]
 #![no_main]
 
-//use cortex_m::Peripherals;
 use core::arch::asm;
 use cortex_m_rt::pre_init;
 use defmt::*;
 use embassy_executor::Spawner;
-//use embassy_stm32::pac::metadata::Peripheral;
 use embassy_stm32::peripherals::{ADC1, ADC2};
 use embassy_stm32::time::Hertz;
-//use embassy_stm32::rcc::low_level::RccPeripheral;
-//use embassy_stm32::timer::low_level::GeneralPurpose16bitInstance;
 use adxl345_eh_driver::{Driver, GRange, OutputDataRate};
 use embassy_stm32::adc::{self, Adc, AdcChannel, AnyAdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
@@ -19,9 +15,6 @@ use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::interrupt;
 use embassy_stm32::usart::{self, Uart};
 use embassy_stm32::Config;
-//use embassy_stm32::timer::pwm_input::PwmInput;
-//use embassy_stm32::time::hz;
-//use embassy_stm32::timer::CountingMode;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
@@ -35,11 +28,6 @@ use heapless::Vec;
 use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
 use embassy_stm32::gpio::Pull;
 
-// CLI buffers - prontos para quando implementar CLI
-// static mut COMMAND_BUFFER: [u8; 64] = [0; 64];
-// static mut HISTORY_BUFFER: [u8; 64] = [0; 64];
-
-// Canais e variáveis compartilhadas
 static UART_TX: Channel<CriticalSectionRawMutex, Vec<u8, 128>, 8> = Channel::new();
 
 // TEMP_RAW: temperatura em décimos de grau (ex: 235 = 23.5°C)
@@ -155,11 +143,8 @@ async fn lm35_task(mut adc2: Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC2>) {
         let raw = (acc / 16) as u16;
 
         // Converte para temperatura
-        // LM35: 10mV/°C → Voltage = (ADC * 3.3V) / 4095
-        // Temp = Voltage / 0.01V = Voltage * 100
         let temp_c = (raw as f32) * 3.3 / 4095.0 * 100.0;
 
-        // Armazena temperatura em décimos de grau para o interrupt TIM3
         TEMP_RAW.store((temp_c * 10.0) as u16, Ordering::Relaxed);
 
         info!("Temp: {} °C (ADC raw: {})", temp_c, raw);
@@ -167,11 +152,6 @@ async fn lm35_task(mut adc2: Adc<'static, ADC2>, mut pin: AnyAdcChannel<ADC2>) {
     }
 }
 
-
-// Motor é controlado diretamente pelo interrupt TIM3 (hard real-time)
-// Não há necessidade de task separada
-
-// Declare async tasks
 #[embassy_executor::task]
 async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<ADC1>) {
     adc.set_sample_time(SampleTime::CYCLES47_5);
@@ -183,8 +163,6 @@ async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<A
     }
 }
 
-// Declare async tasks
-// Declare async tasks
 #[embassy_executor::task]
 async fn button_task(mut button: ExtiInput<'static>) {
     info!("Botão configurado. Pressione para ligar/desligar o motor.");
@@ -212,7 +190,6 @@ async fn button_task(mut button: ExtiInput<'static>) {
     }
 }
 
-// Declare async tasks
 #[embassy_executor::task]
 async fn uart_task(uart: Uart<'static, embassy_stm32::mode::Async>) {
     let (mut tx, mut rx) = uart.split();
@@ -243,7 +220,6 @@ async fn uart_task(uart: Uart<'static, embassy_stm32::mode::Async>) {
                         line.clear();
                     }
                 } else if byte >= 32 && byte <= 126 {
-                    // Echo do caractere
                     tx.write(&[byte]).await.unwrap();
                     let _ = line.push(byte as char);
                 }
@@ -255,36 +231,8 @@ async fn uart_task(uart: Uart<'static, embassy_stm32::mode::Async>) {
     }
 }
 
-
-
-    // PWM agora é controlado via interrupt TIM3 (hard real-time)
-    // A task motor_task calcula o duty cycle e armazena em MOTOR_DUTY
-    // O interrupt handler TIM3 atualiza o PWM diretamente nos registradores
-
-// Declare async tasks
-#[embassy_executor::task]
-async fn accel_task(
-    mut accel: Driver<I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>,
-) {
-    //pub async fn i2c_slave_task(mut i2c_slave: I2c<'static, embassy_stm32::mode::Async, i2c::mode::MultiMaster>) {
-    accel.set_range(GRange::Two).unwrap();
-    accel.set_datarate(OutputDataRate::Hz0_10).unwrap();
-    loop {
-        if let Ok((x, y, z)) = accel.get_accel() {
-            info!("ADXL345 Accel Raw: x={}, y={}, z={}", x, y, z);
-        }
-        Timer::after_millis(1000).await;
-    }
-}
-
-//bind_interrupts!(struct Irqs {
-//    TIM2 => timer::CaptureCompareInterruptHandler<peripherals::TIM2>;
-//});
-
 bind_interrupts!(struct Irqs {
     LPUART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::LPUART1>;
-    I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
-    I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
 
 //#[link_section = ".ram2bss"]
@@ -330,11 +278,9 @@ unsafe fn before_main() {
 // Lê temperatura, calcula duty cycle e atualiza PWM instantaneamente
 #[interrupt]
 fn TIM3() {
-    // Verifica se o motor está habilitado
     let motor_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
     
     let duty = if !motor_enabled {
-        // Motor desligado - duty cycle = 0
         0
     } else if MOTOR_START_PULSE.load(Ordering::Relaxed) {
         // Pulso inicial de 100% por exatamente 200ms para vencer inércia
@@ -343,28 +289,24 @@ fn TIM3() {
         unsafe {
             // Inicializa contador quando pulso é solicitado
             if PULSE_COUNTER == 0 {
-                PULSE_COUNTER = 200; // 200ms = 100 iterações × 2ms
+                PULSE_COUNTER = 200;  
             }
             
-            // Decrementa contador
             if PULSE_COUNTER > 0 {
                 PULSE_COUNTER -= 1;
             }
             
-            // Quando terminar os 200ms, limpa flag de pulso
             if PULSE_COUNTER == 0 {
                 MOTOR_START_PULSE.store(false, Ordering::Relaxed);
             }
             
-            1000  // 100% duty cycle durante todo o pulso
+            1000   
         }
     } else {
-        // Lê temperatura armazenada pela lm35_task
         let temp = TEMP_RAW.load(Ordering::Relaxed) as f32 / 10.0;
 
-        // Calcula duty cycle baseado na temperatura
         if temp < 10.0 {
-            0      // Motor desligado
+            0       
         } else if temp < 20.0 {
             750    // 75% velocidade
         } else if temp < 30.0 {
@@ -376,7 +318,6 @@ fn TIM3() {
 
     MOTOR_DUTY.store(duty, Ordering::Relaxed);
 
-    // Atualiza registradores do timer diretamente (hard real-time)
     let tim3 = embassy_stm32::pac::TIM3;
     tim3.sr().modify(|w| w.set_uif(false));  // Limpa flag de interrupção
     tim3.ccr(1).write(|w| w.set_ccr(duty));  // Atualiza PWM do canal 2
@@ -385,10 +326,6 @@ fn TIM3() {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    //unsafe {
-    //TESTE = 10;
-    //TESTE2 = 20;
-    //}
     let mut config = Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -402,13 +339,9 @@ async fn main(spawner: Spawner) {
             mul: PllMul::MUL85,
             divp: None,
             divq: None,
-            // Main system clock at 170 MHz
             divr: Some(PllRDiv::DIV2),
         });
         config.rcc.sys = Sysclk::PLL1_R;
-        //config.rcc.mux = ClockSrc::PLL;
-
-        //config.rcc.adc12_clock_source = AdcClockSource::SYS;
         config.rcc.mux.adc12sel = mux::Adcsel::SYS;
         config.rcc.ahb_pre = AHBPrescaler::DIV1;
         config.rcc.apb1_pre = APBPrescaler::DIV1;
@@ -422,22 +355,14 @@ async fn main(spawner: Spawner) {
         println!("Teste de variável na memória CCMRAM {}", TESTE);
         println!("Teste de variável na memória SRAM2 {}", TESTE2);
     }
-    //defmt::println!("Hello, world!");
 
     let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
-
-    //let adc = Adc::new(p.ADC1, &mut Delay);
-    //let adc_pin = p.PA1;
-
-    //let adc = Adc::new(p.ADC1);
 
     let adc2 = Adc::new(p.ADC2);
 
     // Spawned tasks run in the background, concurrently.
-    //spawner.spawn(adc_task(adc, p.PA1.degrade_adc())).unwrap();
     spawner.spawn(button_task(button)).unwrap();
     spawner.spawn(lm35_task(adc2, p.PA1.degrade_adc())).unwrap();
-
 
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
@@ -457,7 +382,6 @@ async fn main(spawner: Spawner) {
 
     let mut writer = Writer;
     writer.write(b"Hello from Writer\r\n").unwrap();
-
 
     // Configura PWM no canal 2 (PC7) do TIM3 para controle do motor
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
