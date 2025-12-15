@@ -32,7 +32,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embedded_io::Write;
 use heapless::Vec;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
 use embassy_stm32::gpio::Pull;
 
 // CLI buffers - prontos para quando implementar CLI
@@ -49,6 +49,13 @@ static TEMP_RAW: AtomicU16 = AtomicU16::new(0);
 // MOTOR_DUTY: duty cycle do PWM (0-1000)
 // Calculado pelo interrupt TIM3 e aplicado instantaneamente ao hardware
 static MOTOR_DUTY: AtomicU16 = AtomicU16::new(0);
+
+// MOTOR_ENABLED: controla se o motor está habilitado (true) ou desabilitado (false)
+// Alternado pelo botão do usuário
+static MOTOR_ENABLED: AtomicBool = AtomicBool::new(true);
+
+// MOTOR_START_PULSE: flag para solicitar pulso inicial de 100% ao ligar o motor
+static MOTOR_START_PULSE: AtomicBool = AtomicBool::new(false);
 
 pub struct Writer;
 
@@ -177,15 +184,31 @@ async fn adc_task(mut adc: adc::Adc<'static, ADC1>, mut adc_pin: AnyAdcChannel<A
 }
 
 // Declare async tasks
+// Declare async tasks
 #[embassy_executor::task]
 async fn button_task(mut button: ExtiInput<'static>) {
-    info!("Press the USER button...");
+    info!("Botão configurado. Pressione para ligar/desligar o motor.");
 
     loop {
         button.wait_for_rising_edge().await;
-        info!("Pressed!");
+        
+        // Debounce simples
+        Timer::after_millis(50).await;
+        
+        // Alterna estado do motor
+        let was_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
+        let now_enabled = !was_enabled;
+        MOTOR_ENABLED.store(now_enabled, Ordering::Relaxed);
+        
+        if now_enabled {
+            info!("Motor LIGADO - solicitando pulso inicial");
+            // Solicita pulso inicial de 100% para vencer inércia
+            MOTOR_START_PULSE.store(true, Ordering::Relaxed);
+        } else {
+            info!("Motor DESLIGADO");
+        }
+        
         button.wait_for_falling_edge().await;
-        info!("Released!");
     }
 }
 
@@ -307,18 +330,48 @@ unsafe fn before_main() {
 // Lê temperatura, calcula duty cycle e atualiza PWM instantaneamente
 #[interrupt]
 fn TIM3() {
-    // Lê temperatura armazenada pela lm35_task
-    let temp = TEMP_RAW.load(Ordering::Relaxed) as f32 / 10.0;
-
-    // Calcula duty cycle baseado na temperatura
-    let duty = if temp < 10.0 {
-        0      // Motor desligado
-    } else if temp < 20.0 {
-        750    // 75% velocidade
-    } else if temp < 30.0 {
-        900    // 90% velocidade
+    // Verifica se o motor está habilitado
+    let motor_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
+    
+    let duty = if !motor_enabled {
+        // Motor desligado - duty cycle = 0
+        0
+    } else if MOTOR_START_PULSE.load(Ordering::Relaxed) {
+        // Pulso inicial de 100% por exatamente 200ms para vencer inércia
+        // Contador interno: a cada interrupt (~2ms), decrementa
+        static mut PULSE_COUNTER: u8 = 0;
+        unsafe {
+            // Inicializa contador quando pulso é solicitado
+            if PULSE_COUNTER == 0 {
+                PULSE_COUNTER = 200; // 200ms = 100 iterações × 2ms
+            }
+            
+            // Decrementa contador
+            if PULSE_COUNTER > 0 {
+                PULSE_COUNTER -= 1;
+            }
+            
+            // Quando terminar os 200ms, limpa flag de pulso
+            if PULSE_COUNTER == 0 {
+                MOTOR_START_PULSE.store(false, Ordering::Relaxed);
+            }
+            
+            1000  // 100% duty cycle durante todo o pulso
+        }
     } else {
-        1000   // 100% velocidade
+        // Lê temperatura armazenada pela lm35_task
+        let temp = TEMP_RAW.load(Ordering::Relaxed) as f32 / 10.0;
+
+        // Calcula duty cycle baseado na temperatura
+        if temp < 10.0 {
+            0      // Motor desligado
+        } else if temp < 20.0 {
+            750    // 75% velocidade
+        } else if temp < 30.0 {
+            900    // 90% velocidade
+        } else {
+            1000   // 100% velocidade
+        }
     };
 
     MOTOR_DUTY.store(duty, Ordering::Relaxed);
