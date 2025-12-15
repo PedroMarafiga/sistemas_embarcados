@@ -5,6 +5,9 @@ use core::arch::asm;
 use cortex_m_rt::pre_init;
 use defmt::*;
 use embassy_executor::Spawner;
+//use embassy_stm32::pac::metadata::Peripheral;
+mod utils;
+
 use embassy_stm32::peripherals::{ADC2};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime};
@@ -18,8 +21,10 @@ use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
 use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
-use embassy_stm32::gpio::Pull;
-
+use embassy_stm32::gpio::{Pull, Level, Output, Speed};
+use embassy_stm32::usart::{self, Uart};
+use embassy_stm32::bind_interrupts;
+use embassy_stm32::i2c;
 
 // TEMP_RAW: temperatura em décimos de grau (ex: 235 = 23.5°C)
 // Lida pelo interrupt TIM3 para controle hard real-time do motor
@@ -86,6 +91,23 @@ async fn button_task(mut button: ExtiInput<'static>) {
         button.wait_for_falling_edge().await;
     }
 }
+
+#[embassy_executor::task]
+async fn blink_task(mut led: Output<'static>) {
+    loop {
+        led.set_high();
+        Timer::after_millis(2000).await;
+
+        led.set_low();
+        Timer::after_millis(500).await;
+    }
+}
+
+bind_interrupts!(struct Irqs {
+    LPUART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::LPUART1>;
+    I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
+    I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
+});
 
 //#[link_section = ".ram2bss"]
 #[link_section = ".ccmram"]
@@ -216,7 +238,14 @@ async fn main(spawner: Spawner) {
     spawner.spawn(button_task(button)).unwrap();
     spawner.spawn(lm35_task(adc2, p.PA1.degrade_adc())).unwrap();
 
-    // Configura PWM no canal 2 (PC7) do TIM3 para controle do motor
+    let mut config = usart::Config::default();
+    config.baudrate = 115_200;
+    let lpusart = Uart::new(
+        p.LPUART1, p.PA3, p.PA2, Irqs, p.DMA1_CH1, p.DMA1_CH2, config,
+    )
+    .unwrap();
+    spawner.spawn(utils::uart_task(lpusart)).unwrap();
+
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
     let mut pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
         p.TIM3,
@@ -250,7 +279,9 @@ async fn main(spawner: Spawner) {
         // Garante que o timer está habilitado
         tim3.cr1().modify(|w| w.set_cen(true));
     }
-    
+    let led = Output::new(p.PA5, Level::High, Speed::Low);
+
+    spawner.spawn(blink_task(led)).unwrap();
     // IMPORTANTE: Não fazer drop! PWM precisa ficar vivo para o timer continuar rodando
     // Usamos core::mem::forget para prevenir o destructor de desabilitar o timer
     core::mem::forget(pwm);
