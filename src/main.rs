@@ -112,12 +112,6 @@ bind_interrupts!(struct Irqs {
     I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
 
-#[link_section = ".ccmram"]
-static mut TESTE: i32 = 60;
-
-#[link_section = ".data2"]
-static mut TESTE2: i32 = 70;
-
 #[pre_init]
 unsafe fn before_main() {
     unsafe {
@@ -193,8 +187,9 @@ fn TIM3() {
     MOTOR_DUTY.store(duty, Ordering::Relaxed);
 
     let tim3 = embassy_stm32::pac::TIM3;
-    tim3.sr().modify(|w| w.set_uif(false));  // Limpa flag de interrupção
     tim3.ccr(1).write(|w| w.set_ccr(duty));  
+    tim3.sr().modify(|w| w.set_uif(false));  // Limpa flag de interrupção
+    
 }
 
 #[embassy_executor::main]
@@ -224,22 +219,17 @@ async fn main(spawner: Spawner) {
     let p: embassy_stm32::Peripherals = embassy_stm32::init(config);
 
     info!("Hello World!");
-    unsafe {
-        println!("Teste de variável na memória CCMRAM {}", TESTE);
-        println!("Teste de variável na memória SRAM2 {}", TESTE2);
-    }
 
+    /* --- BOTÃO --- */
     let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
-
-    let adc2 = Adc::new(p.ADC2);
-    let adc_pin = p.PA1.degrade_adc();
-    
-
-    spawner.spawn(lm35_task(adc2, adc_pin, p.DMA1_CH3)).unwrap();
-
-    // Spawned tasks run in the background, concurrently.
     spawner.spawn(button_task(button)).unwrap();
 
+    /* --- SENSOR DE TEMPERATURA --- */
+    let adc2 = Adc::new(p.ADC2);
+    let adc_pin = p.PA1.degrade_adc();
+    spawner.spawn(lm35_task(adc2, adc_pin, p.DMA1_CH3)).unwrap();
+
+    /* --- USART LPUART1 --- */
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
     let lpusart = Uart::new(
@@ -248,6 +238,7 @@ async fn main(spawner: Spawner) {
     .unwrap();
     spawner.spawn(utils::uart_task(lpusart)).unwrap();
 
+    /* --- PWM + TIM3 --- */
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
     let mut pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
         p.TIM3,
@@ -261,8 +252,11 @@ async fn main(spawner: Spawner) {
 
     pwm.ch2().enable();
 
+    /* --- TIMER 3 --- */
     unsafe {
         let tim3 = embassy_stm32::pac::TIM3;
+
+        tim3.cr1().modify(|w| w.set_cen(false));
 
         tim3.psc().write_value(169);
 
@@ -274,6 +268,8 @@ async fn main(spawner: Spawner) {
             w.set_ocpe(1, true); // Preload enable
         });
 
+        tim3.ccr(1).write(|w| w.set_ccr(0));
+
         tim3.ccer().modify(|w| {
             w.set_cce(1, true);
             w.set_ccp(1, false);
@@ -282,14 +278,17 @@ async fn main(spawner: Spawner) {
         // Força atualização dos registradores
         tim3.egr().write(|w| w.set_ug(true));
 
+        tim3.sr().modify(|w| w.set_uif(false));
         tim3.dier().modify(|w| w.set_uie(true));
 
         cortex_m::peripheral::NVIC::unmask(embassy_stm32::interrupt::TIM3);
 
         tim3.cr1().modify(|w| w.set_cen(true));
     }
-    let led = Output::new(p.PA5, Level::High, Speed::Low);
 
+    /* --- LED --- */
+    let led = Output::new(p.PA5, Level::High, Speed::Low);
     spawner.spawn(blink_task(led)).unwrap();
+
     core::mem::forget(pwm);
 }
