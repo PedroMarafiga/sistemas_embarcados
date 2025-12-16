@@ -100,7 +100,7 @@ async fn process_command(uart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &
             uart.write(b"  3. uart_task      - Console/UART handler\r\n")
                 .await
                 .unwrap();
-            uart.write(b"  4. pwm_task       - Controle PWM (TIM3)\r\n")
+            uart.write(b"  4. pwm      - Controle PWM (TIM3)\r\n")
                 .await
                 .unwrap();
             uart.write(b"  5. main_loop      - LED blinker\r\n")
@@ -149,7 +149,7 @@ async fn process_command(uart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &
             uart.write(b"    Funcao: Deteccao de pressionamento de botao\r\n")
                 .await
                 .unwrap();
-            uart.write(b"  pwm_task:\r\n").await.unwrap();
+            uart.write(b"  pwm:\r\n").await.unwrap();
             uart.write(b"    Periodo: 300ms (4 steps)\r\n")
                 .await
                 .unwrap();
