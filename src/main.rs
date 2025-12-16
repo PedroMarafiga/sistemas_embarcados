@@ -185,7 +185,7 @@ fn TIM3() {
         let current_duty = MOTOR_DUTY.load(Ordering::Relaxed);
         
         let (duty, _new_zone) = if current_duty == 0 {
-            if temp < (FAIXAS[0] + HISTERESE) {
+            if temp  < (FAIXAS[0] + HISTERESE) {
                 (0, 0)
             } else if temp < (FAIXAS[1] + HISTERESE) {
                 (750, 1)
