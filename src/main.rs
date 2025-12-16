@@ -37,8 +37,8 @@ static TEMP_RAW: AtomicU32 = AtomicU32::new(0);
 #[link_section = ".ccmdata"]
 static MOTOR_DUTY: AtomicU16 = AtomicU16::new(0);
 
+//ficam na .bss por default
 static MOTOR_ENABLED: AtomicBool = AtomicBool::new(false);
-
 static MOTOR_START_PULSE: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task]
@@ -91,7 +91,7 @@ async fn button_task(mut button: ExtiInput<'static>) {
         MOTOR_ENABLED.store(now_enabled, Ordering::Relaxed);
 
         if now_enabled {
-            info!("Motor LIGADO - solicitando pulso inicial");
+            info!("Motor LIGADO");
             MOTOR_START_PULSE.store(true, Ordering::Relaxed);
         } else {
             info!("Motor DESLIGADO");
@@ -160,7 +160,7 @@ fn TIM3() {
         unsafe {
             let tim3 = embassy_stm32::pac::TIM3;
             let now = tim3.cnt().read().cnt();
-            const PULSE_TICKS: u16 = 400; // depende do clock e prescaler
+            const PULSE_TICKS: u16 = 400; 
 
             // Inicializa contador quando pulso é solicitado
             if PULSE_START_CNT == 0 {
@@ -180,45 +180,46 @@ fn TIM3() {
         let temp = TEMP_RAW.load(Ordering::Relaxed);
         
         const HISTERESE: u32 = 20; // 2°C de histerese
+        const FAIXAS: [u32; 3] = [100, 200, 300]; // em décimos de grau
         
         let current_duty = MOTOR_DUTY.load(Ordering::Relaxed);
         
         let (duty, _new_zone) = if current_duty == 0 {
-            if temp < (100 + HISTERESE) {
+            if temp < (FAIXAS[0] + HISTERESE) {
                 (0, 0)
-            } else if temp < (200 + HISTERESE) {
+            } else if temp < (FAIXAS[1] + HISTERESE) {
                 (750, 1)
-            } else if temp < (300 + HISTERESE) {
+            } else if temp < (FAIXAS[2] + HISTERESE) {
                 (900, 2)
             } else {
                 (1000, 3)
             }
         } else if current_duty <= 750 {
-            if temp < (100 - HISTERESE) {
+            if temp < (FAIXAS[0] - HISTERESE) {
                 (0, 0)
-            } else if temp < (200 + HISTERESE) {
+            } else if temp < (FAIXAS[1] + HISTERESE) {
                 (750, 1)
-            } else if temp < (300 + HISTERESE) {
+            } else if temp < (FAIXAS[2] + HISTERESE) {
                 (900, 2)
             } else {
                 (1000, 3)
             }
         } else if current_duty <= 900 {
-            if temp < (100 - HISTERESE) {
+            if temp < (FAIXAS[0] - HISTERESE) {
                 (0, 0)
-            } else if temp < (200 - HISTERESE) {
+            } else if temp < (FAIXAS[1] - HISTERESE) {
                 (750, 1)
-            } else if temp < (300 + HISTERESE) {
+            } else if temp < (FAIXAS[2] + HISTERESE) {
                 (900, 2)
             } else {
                 (1000, 3)
             }
         } else {
-            if temp < (100 - HISTERESE) {
+            if temp < (FAIXAS[0] - HISTERESE) {
                 (0, 0)
-            } else if temp < (200 - HISTERESE) {
+            } else if temp < (FAIXAS[1] - HISTERESE) {
                 (750, 1)
-            } else if temp < (300 - HISTERESE) {
+            } else if temp < (FAIXAS[2] - HISTERESE) {
                 (900, 2)
             } else {
                 (1000, 3)
@@ -260,8 +261,6 @@ async fn main(spawner: Spawner) {
         config.rcc.apb2_pre = APBPrescaler::DIV1;
     }
     let p: embassy_stm32::Peripherals = embassy_stm32::init(config);
-
-    info!("Hello World!");
 
     /* --- BOTÃO --- */
     let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
