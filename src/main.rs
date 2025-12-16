@@ -194,7 +194,7 @@ fn TIM3() {
 
     let tim3 = embassy_stm32::pac::TIM3;
     tim3.sr().modify(|w| w.set_uif(false));  // Limpa flag de interrupção
-    tim3.ccr(1).write(|w| w.set_ccr(duty));  // Atualiza PWM do canal 1
+    tim3.ccr(1).write(|w| w.set_ccr(duty));  
 }
 
 #[embassy_executor::main]
@@ -264,8 +264,22 @@ async fn main(spawner: Spawner) {
     unsafe {
         let tim3 = embassy_stm32::pac::TIM3;
 
+        tim3.psc().write_value(169);
+
         tim3.arr().write(|w| w.set_arr(1000));
 
+        // Configura modo PWM no canal 2 (índice 1)
+        tim3.ccmr_output(1).modify(|w| {
+            w.set_ocm(1, embassy_stm32::pac::timer::vals::Ocm::PWM_MODE1);
+            w.set_ocpe(1, true); // Preload enable
+        });
+
+        tim3.ccer().modify(|w| {
+            w.set_cce(1, true);
+            w.set_ccp(1, false);
+        });
+
+        // Força atualização dos registradores
         tim3.egr().write(|w| w.set_ug(true));
 
         tim3.dier().modify(|w| w.set_uie(true));
