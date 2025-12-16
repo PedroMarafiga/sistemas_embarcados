@@ -166,7 +166,7 @@ async fn process_command(uart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &
             uart.write(b"  Executor: Embassy async\r\n").await.unwrap();
             uart.write(b"  Total Tasks: 5\r\n").await.unwrap();
         }
-        "m" => {
+        "motor_switch" => {
             let was_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
             let now_enabled = !was_enabled;
             MOTOR_ENABLED.store(now_enabled, Ordering::Relaxed);
