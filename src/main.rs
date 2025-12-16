@@ -80,8 +80,7 @@ async fn button_task(mut button: ExtiInput<'static>) {
 
         Timer::after_millis(50).await;
 
-        let was_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
-        let now_enabled = !was_enabled;
+        let now_enabled = !MOTOR_ENABLED.load(Ordering::Relaxed);
         MOTOR_ENABLED.store(now_enabled, Ordering::Relaxed);
 
         if now_enabled {
@@ -111,12 +110,6 @@ bind_interrupts!(struct Irqs {
     I2C1_EV => i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
 });
-
-#[link_section = ".ccmram"]
-static mut TESTE: i32 = 60;
-
-#[link_section = ".data2"]
-static mut TESTE2: i32 = 70;
 
 #[pre_init]
 unsafe fn before_main() {
@@ -151,7 +144,7 @@ unsafe fn before_main() {
 
 #[interrupt]
 fn TIM3() {
-    let motor_enabled = MOTOR_ENABLED.load(Ordering::Relaxed);
+    let motor_enabled: bool = MOTOR_ENABLED.load(Ordering::Relaxed);
     static mut PULSE_START_CNT: u16 = 0;
 
     let duty = if !motor_enabled {
@@ -160,7 +153,7 @@ fn TIM3() {
         unsafe {
             let tim3 = embassy_stm32::pac::TIM3;
             let now = tim3.cnt().read().cnt();
-            const PULSE_TICKS: u16 = 200; // depende do clock e prescaler
+            const PULSE_TICKS: u16 = 400; // depende do clock e prescaler
 
             // Inicializa contador quando pulso é solicitado
             if PULSE_START_CNT == 0 {
@@ -220,26 +213,22 @@ async fn main(spawner: Spawner) {
         config.rcc.apb1_pre = APBPrescaler::DIV1;
         config.rcc.apb2_pre = APBPrescaler::DIV1;
     }
-
     let p: embassy_stm32::Peripherals = embassy_stm32::init(config);
 
-    info!("Hello World!");
-    unsafe {
-        println!("Teste de variável na memória CCMRAM {}", TESTE);
-        println!("Teste de variável na memória SRAM2 {}", TESTE2);
-    }
-
+    //botão da placa
     let button = ExtiInput::new(p.PC13, p.EXTI13, Pull::Down);
-
-    let adc2 = Adc::new(p.ADC2);
-    let adc_pin = p.PA1.degrade_adc();
-    
-
-    spawner.spawn(lm35_task(adc2, adc_pin, p.DMA1_CH3)).unwrap();
-
-    // Spawned tasks run in the background, concurrently.
     spawner.spawn(button_task(button)).unwrap();
 
+    // leitura pelo adc lm35
+    let adc2 = Adc::new(p.ADC2);
+    let adc_pin = p.PA1.degrade_adc();
+    spawner.spawn(lm35_task(adc2, adc_pin, p.DMA1_CH3)).unwrap();
+
+    // pisca led
+    let led = Output::new(p.PA5, Level::High, Speed::Low);
+    spawner.spawn(blink_task(led)).unwrap();
+
+    // UART console
     let mut config = usart::Config::default();
     config.baudrate = 115_200;
     let lpusart = Uart::new(
@@ -248,6 +237,8 @@ async fn main(spawner: Spawner) {
     .unwrap();
     spawner.spawn(utils::uart_task(lpusart)).unwrap();
 
+
+    // Configura PWM TIM3 CH2 (PC7) para controle do motor
     let ch2_pin = PwmPin::new(p.PC7, OutputType::PushPull);
     let mut pwm: SimplePwm<'_, embassy_stm32::peripherals::TIM3> = SimplePwm::new(
         p.TIM3,
@@ -288,8 +279,6 @@ async fn main(spawner: Spawner) {
 
         tim3.cr1().modify(|w| w.set_cen(true));
     }
-    let led = Output::new(p.PA5, Level::High, Speed::Low);
-
-    spawner.spawn(blink_task(led)).unwrap();
+    
     core::mem::forget(pwm);
 }
