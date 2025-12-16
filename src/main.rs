@@ -21,7 +21,7 @@ use embassy_stm32::Peri;
 
 use {defmt_rtt as _, panic_probe as _};
 
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
 use embassy_stm32::i2c;
@@ -30,7 +30,7 @@ use embassy_stm32::usart::{self, Uart};
 // TEMP_RAW: temperatura em décimos de grau (ex: 235 = 23.5°C)
 // Lida pelo interrupt TIM3 para controle hard real-time do motor
 #[link_section = ".data2"]
-static TEMP_RAW: AtomicU16 = AtomicU16::new(0);
+static TEMP_RAW: AtomicU32 = AtomicU32::new(0);
 
 // MOTOR_DUTY: duty cycle do PWM (0-1000)
 // Calculado pelo interrupt TIM3 e aplicado instantaneamente ao hardware
@@ -61,11 +61,18 @@ async fn lm35_task(
 
         let raw = adc_buf[0];
 
-        let temp_c = (raw as f32) * 3.3 / 4095.0 * 100.0;
+        let temp_c = (((raw as u32 * 3300) >> 12)) as u32;
+        // let old_temp_c = (raw as f32) * 3.3 / 4095.0 * 100.0;
 
-        TEMP_RAW.store((temp_c * 10.0) as u16, Ordering::Relaxed);
+        TEMP_RAW.store(temp_c, Ordering::Relaxed);
 
-        info!("Temp: {} °C (ADC raw: {}, button state: {})", temp_c, raw, MOTOR_ENABLED.load(Ordering::Relaxed));
+        let temp_c_int = temp_c / 10;
+        let temp_c_frac = temp_c % 10;
+
+        
+        // info!("Temp: {} °C (ADC raw: {}, button state: {})", old_temp_c, raw, MOTOR_ENABLED.load(Ordering::Relaxed));
+
+        info!("Temp: {}.{} °C (ADC raw: {}, button state: {})", temp_c_int, temp_c_frac, raw, MOTOR_ENABLED.load(Ordering::Relaxed));
 
         Timer::after_millis(500).await;
     }
@@ -171,16 +178,54 @@ fn TIM3() {
         }
     } else {
         let temp = TEMP_RAW.load(Ordering::Relaxed);
-
-        if temp < 100 {
-            0       
-        } else if temp < 200 {
-            750    // 75% velocidade
-        } else if temp < 300 {
-            900    // 90% velocidade
+        
+        const HISTERESE: u32 = 20; // 2°C de histerese
+        
+        let current_duty = MOTOR_DUTY.load(Ordering::Relaxed);
+        
+        let (duty, _new_zone) = if current_duty == 0 {
+            if temp < (100 + HISTERESE) {
+                (0, 0)
+            } else if temp < (200 + HISTERESE) {
+                (750, 1)
+            } else if temp < (300 + HISTERESE) {
+                (900, 2)
+            } else {
+                (1000, 3)
+            }
+        } else if current_duty <= 750 {
+            if temp < (100 - HISTERESE) {
+                (0, 0)
+            } else if temp < (200 + HISTERESE) {
+                (750, 1)
+            } else if temp < (300 + HISTERESE) {
+                (900, 2)
+            } else {
+                (1000, 3)
+            }
+        } else if current_duty <= 900 {
+            if temp < (100 - HISTERESE) {
+                (0, 0)
+            } else if temp < (200 - HISTERESE) {
+                (750, 1)
+            } else if temp < (300 + HISTERESE) {
+                (900, 2)
+            } else {
+                (1000, 3)
+            }
         } else {
-            1000 // 100% velocidade
-        }
+            if temp < (100 - HISTERESE) {
+                (0, 0)
+            } else if temp < (200 - HISTERESE) {
+                (750, 1)
+            } else if temp < (300 - HISTERESE) {
+                (900, 2)
+            } else {
+                (1000, 3)
+            }
+        };
+        
+        duty
     };
 
     MOTOR_DUTY.store(duty, Ordering::Relaxed);
